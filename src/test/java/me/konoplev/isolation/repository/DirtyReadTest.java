@@ -1,23 +1,23 @@
 package me.konoplev.isolation.repository;
 
 import java.util.List;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 
-import me.konoplev.isolation.PostgresTest;
-import me.konoplev.isolation.TransactionsWrapper;
+import me.konoplev.isolation.MySqlTest;
 import me.konoplev.isolation.repository.dto.Account;
 import me.konoplev.isolation.repository.dto.User;
+import me.konoplev.isolation.util.PhaseSync;
+import me.konoplev.isolation.util.PhaseSync.Phases;
+import me.konoplev.isolation.util.TransactionsWrapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.dao.DataIntegrityViolationException;
 
 import static java.util.concurrent.CompletableFuture.runAsync;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.is;
 
-@PostgresTest
+@MySqlTest
 class DirtyReadTest {
 
   @Autowired
@@ -36,113 +36,66 @@ class DirtyReadTest {
   }
 
   @Test
-  public void test() {
-    // given
-    var sameName = "sameName";
-    transactionsWrapper.readCommitted(() -> {
-      var user = new User();
-      user.setUserName(sameName);
-      userRepository.save(user);
-    });
-    var accountIsCreatedLatch = new CountDownLatch(1);
-    var accountIsFetchedLatch = new CountDownLatch(2);
-    var transactionIsRolledBack = new CountDownLatch(1);
-    // when
-    runAsync(() -> {
-      try {
-        transactionsWrapper.readUncommitted(() -> {
-          for (int i = 0; i < 100; i++) {
-            var account = new Account();
-            account.setAmount(i);
-            accountRepository.saveAndFlush(account);
-          }
-          accountIsCreatedLatch.countDown();
-          wait(accountIsFetchedLatch);
-          var user = new User();
-          user.setUserName("sameName");
-          user.setAccounts(List.of());
-          userRepository.saveAndFlush(user);
-        });
-      } catch (Exception e) {
-        // expected
-        System.out.println(e);
-        transactionIsRolledBack.countDown();
-      }
-    });
-
-    // then
-    runAsync(() -> {
-      transactionsWrapper.readUncommitted(() -> {
-        wait(accountIsCreatedLatch);
-        System.out.println("Number of accounts while transaction is executing: " + accountRepository.count());
-        System.out.println("Number of users while transaction is executing: " + userRepository.count());
-        accountIsFetchedLatch.countDown();
-      });
-    });
-    runAsync(() -> {
-      transactionsWrapper.readCommitted(() -> {
-        wait(accountIsCreatedLatch);
-        System.out.println("Number of accounts from read committed: " + accountRepository.count());
-        accountIsFetchedLatch.countDown();
-      });
-    });
-    wait(transactionIsRolledBack);
-  }
-
-  @Test
-  public void test2() {
+  public void test() throws Exception {
     //given
-    AtomicInteger userIdAtomic = new AtomicInteger(-1);
     transactionsWrapper.readCommitted(() -> {
       var user = new User();
       user.setUserName("someName");
-      userIdAtomic.set(userRepository.save(user).getId());
+      userRepository.saveAndFlush(user);
     });
-    int userId = userIdAtomic.get();
 
     //expected
-    CountDownLatch startCreating = new CountDownLatch(1);
-    CountDownLatch partiallyCreated = new CountDownLatch(1);
-    CountDownLatch canBeCompletedNow = new CountDownLatch(1);
-
+    var phaseSync = new PhaseSync();
     runAsync(() -> {
-      transactionsWrapper.readUncommitted(() -> {
-        wait(startCreating);
-        var account = new Account();
-        account.setAmount(10);
-        accountRepository.save(account);
-        assertThat(accountRepository.count(), is(1L));
-        partiallyCreated.countDown();
-        wait(canBeCompletedNow);
-        var user = new User();
-        user.setAccounts(List.of(account));
-        user.setUserName("someName");
-        userRepository.save(user);
-      });
+      try {
+        transactionsWrapper.readUncommittedFallible(() -> {
+          //partially create an account
+          var account = new Account();
+
+          phaseSync.phase(Phases.SECOND, () -> {
+            account.setAmount(10);
+            account.setId(1);
+            accountRepository.saveAndFlush(account);
+          });
+
+          phaseSync.phaseWithExpectedException(Phases.FOURTH, () -> {
+            var user = new User();
+            user.setAccounts(List.of(account));
+            user.setUserName("someName");
+            userRepository.saveAndFlush(user);
+            //the exception is thrown because there is an account with this name already
+            //so the whole transaction is reverted
+          }, DataIntegrityViolationException.class);
+          phaseSync.ifAnyExceptionRethrow();
+        });
+      } catch (Exception e) {
+        phaseSync.phase(Phases.FIFTH, () -> {
+          //Spring is rolling the transaction back
+        });
+      }
     });
 
     transactionsWrapper.readUncommitted(() -> {
-      assertThat(accountRepository.count(), is(0L));
+      phaseSync.phase(Phases.FIRST, () -> {
+        //there are no accounts yet
+        assertThat(accountRepository.count(), is(0L));
+      });
 
       //now another transaction runs in parallel and creates the account
-      startCreating.countDown();
-      wait(partiallyCreated);
+      phaseSync.phase(Phases.THIRD, () -> {
+        //this transaction sees that there is 1 account, but it will be reverted soon
+        assertThat(accountRepository.count(), is(1L));
+      });
 
-      //this transaction sees that there is 1 account, but it will be reverted soon
-      assertThat(accountRepository.count(), is(1L));
-      canBeCompletedNow.countDown();
+      // the parallel transaction is rolled back. no accounts again
+      phaseSync.phase(Phases.SIXTH, () -> {
+        assertThat(accountRepository.count(), is(0L));
+      });
     });
 
+    phaseSync.phase(Phases.SEVENTH, () -> {/*done with all phases*/});
+    assertThat(phaseSync.exceptionDetails(), phaseSync.noExceptions(), is(true));
+
   }
 
-
-  private void wait(CountDownLatch latch) {
-    try {
-      if (!latch.await(3, TimeUnit.MINUTES)) {
-        throw new RuntimeException("Timeout exceeded");
-      }
-    } catch (InterruptedException e) {
-      e.printStackTrace();
-    }
-  }
 }

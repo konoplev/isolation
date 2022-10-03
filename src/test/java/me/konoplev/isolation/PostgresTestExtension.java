@@ -31,6 +31,7 @@ public class PostgresTestExtension implements BeforeAllCallback, AfterAllCallbac
     System.setProperty("spring.datasource.url", container.getJdbcUrl());
     System.setProperty("spring.datasource.username", container.getUsername());
     System.setProperty("spring.datasource.password", container.getPassword());
+    System.setProperty("spring.jpa.properties.hibernate.dialect", "org.hibernate.dialect.PostgreSQLDialect");
   }
 
   @Override

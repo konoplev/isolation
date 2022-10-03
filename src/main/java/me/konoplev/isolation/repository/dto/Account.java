@@ -11,7 +11,6 @@ import lombok.ToString;
 public class Account {
 
   @Id
-  @GeneratedValue
   private Integer id;
 
   @ManyToOne

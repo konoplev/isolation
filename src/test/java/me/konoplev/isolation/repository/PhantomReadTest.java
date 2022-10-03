@@ -1,20 +1,24 @@
 package me.konoplev.isolation.repository;
 
 import java.util.List;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import me.konoplev.isolation.PostgresTest;
-import me.konoplev.isolation.TransactionsWrapper;
 import me.konoplev.isolation.repository.dto.Account;
 import me.konoplev.isolation.repository.dto.User;
+import me.konoplev.isolation.util.PhaseSync;
+import me.konoplev.isolation.util.PhaseSync.Phases;
+import me.konoplev.isolation.util.TransactionsWrapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.dao.CannotAcquireLockException;
+
+import static java.util.concurrent.CompletableFuture.runAsync;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.is;
-import static java.util.concurrent.CompletableFuture.runAsync;
+import static org.hamcrest.Matchers.startsWith;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 @PostgresTest
 public class PhantomReadTest {
@@ -36,127 +40,125 @@ public class PhantomReadTest {
 
   @Test
   public void test() {
-    //given
-    AtomicInteger userIdAtomic = new AtomicInteger(-1);
     transactionsWrapper.readCommitted(() -> {
+      //given
       var user = new User();
       user.setUserName("someName");
       var account1 = new Account();
+      account1.setId(1);
       account1.setUser(user);
-      account1.setAmount(100);
+      account1.setAmount(40);
       var account2 = new Account();
+      account2.setId(2);
       account2.setAmount(50);
       account2.setUser(user);
       user.setAccounts(List.of(account1, account2));
-      userIdAtomic.set(userRepository.save(user).getId());
+      userRepository.saveAndFlush(user);
     });
-    int userId = userIdAtomic.get();
 
-    //expected
-    CountDownLatch startFirst = new CountDownLatch(1);
-    CountDownLatch startSecond = new CountDownLatch(1);
-    CountDownLatch bothTransactionsAreDone = new CountDownLatch(2);
+    //expect
+    PhaseSync phaseSync = new PhaseSync();
+    final var amount = 30;
+
     runAsync(() -> {
       transactionsWrapper.repeatableRead(() -> {
-        var user = userRepository.findById(userId).orElseThrow();
-        startSecond.countDown();
-        wait(startFirst);
-        int moneyToWithdraw = 50;
-        if (getSum(user) >= moneyToWithdraw * 3) {
-          var fistAccount = user.getAccounts().get(0);
-          fistAccount.setAmount(fistAccount.getAmount() - moneyToWithdraw);
-          userRepository.save(user);
+        AtomicBoolean isWithdrawAllowed = new AtomicBoolean(false);
+        phaseSync.phase(Phases.FIRST, () ->
+            isWithdrawAllowed.compareAndSet(false, allowedToWithdraw(amount)));
+        if (isWithdrawAllowed.get()) {
+          phaseSync.phase(Phases.THIRD, () -> withdraw(amount, 1));
         }
-        bothTransactionsAreDone.countDown();
       });
-
+      phaseSync.phase(Phases.FOURTH, () -> {/* transaction is commited */});
     });
+
     runAsync(() -> {
       transactionsWrapper.repeatableRead(() -> {
-        var user = userRepository.findById(userId).orElseThrow();
-        startFirst.countDown();
-        wait(startSecond);
-        int moneyToWithdraw = 50;
-        if (getSum(user) >= moneyToWithdraw * 3) {
-          var secondAccount = user.getAccounts().get(1);
-          secondAccount.setAmount(secondAccount.getAmount() - moneyToWithdraw);
-          userRepository.save(user);
+        AtomicBoolean isWithdrawAllowed = new AtomicBoolean(false);
+        phaseSync.phase(Phases.SECOND, () ->
+            isWithdrawAllowed.compareAndSet(false, allowedToWithdraw(amount)));
+        if (isWithdrawAllowed.get()) {
+          phaseSync.phase(Phases.FIFTH, () -> withdraw(amount, 2));
         }
-        bothTransactionsAreDone.countDown();
       });
     });
-    wait(bothTransactionsAreDone);
-    assertThat(getSum(userRepository.findById(userId).orElseThrow()), is(50));
+    phaseSync.phase(Phases.SIXTH, () -> {/*done with all phases*/});
+    assertThat(phaseSync.noExceptions(), is(true));
+    // the constraint is violated
+    assertThat(accountRepository.findAll().stream().mapToInt(Account::getAmount).sum(), is(30));
   }
 
   @Test
   public void testFix() {
-    //given
-    AtomicInteger userIdAtomic = new AtomicInteger(-1);
     transactionsWrapper.readCommitted(() -> {
+      //given
       var user = new User();
       user.setUserName("someName");
       var account1 = new Account();
+      account1.setId(1);
       account1.setUser(user);
-      account1.setAmount(100);
+      account1.setAmount(40);
       var account2 = new Account();
+      account2.setId(2);
       account2.setAmount(50);
       account2.setUser(user);
       user.setAccounts(List.of(account1, account2));
-      userIdAtomic.set(userRepository.save(user).getId());
+      userRepository.saveAndFlush(user);
     });
-    int userId = userIdAtomic.get();
 
-    //expected
-    CountDownLatch startFirst = new CountDownLatch(1);
-    CountDownLatch startSecond = new CountDownLatch(1);
-    CountDownLatch bothTransactionsAreDone = new CountDownLatch(2);
-    runAsync(() -> {
-      transactionsWrapper.serializable(() -> {
-        var user = userRepository.findById(userId).orElseThrow();
-        startSecond.countDown();
-        wait(startFirst);
-        int moneyToWithdraw = 50;
-        if (getSum(user) >= moneyToWithdraw * 3) {
-          var fistAccount = user.getAccounts().get(0);
-          fistAccount.setAmount(fistAccount.getAmount() - moneyToWithdraw);
-          userRepository.save(user);
-        }
-        bothTransactionsAreDone.countDown();
-      });
+    //expect
+    PhaseSync phaseSync = new PhaseSync();
+    final var amount = 30;
 
-    });
     runAsync(() -> {
-      transactionsWrapper.serializable(() -> {
-        var user = userRepository.findById(userId).orElseThrow();
-        startFirst.countDown();
-        wait(startSecond);
-        int moneyToWithdraw = 50;
-        if (getSum(user) >= moneyToWithdraw * 3) {
-          var secondAccount = user.getAccounts().get(1);
-          secondAccount.setAmount(secondAccount.getAmount() - moneyToWithdraw);
-          userRepository.save(user);
-        }
-        bothTransactionsAreDone.countDown();
+        transactionsWrapper.serializable(() -> {
+          AtomicBoolean isWithdrawAllowed = new AtomicBoolean(false);
+          phaseSync.phase(Phases.FIRST, () ->
+              isWithdrawAllowed.compareAndSet(false, allowedToWithdraw(amount)));
+          if (isWithdrawAllowed.get()) {
+            phaseSync.phase(Phases.THIRD, () -> withdraw(amount, 1));
+          }
+        });
+      phaseSync.phase(Phases.FOURTH, () -> {/* transaction is commited */});
+    });
+
+    runAsync(() -> {
+      assertThrows(CannotAcquireLockException.class, () -> {
+        transactionsWrapper.serializableFallible(() -> {
+          AtomicBoolean isWithdrawAllowed = new AtomicBoolean(false);
+          phaseSync.phase(Phases.SECOND, () ->
+              isWithdrawAllowed.compareAndSet(false, allowedToWithdraw(amount)));
+          if (isWithdrawAllowed.get()) {
+            phaseSync.phase(Phases.FIFTH, () -> withdraw(amount, 2));
+          }
+          // we can't update the second account. the first transaction is committed and the data we used to check the constraint is stale now
+          assertThat(phaseSync.noExceptions(), is(false));
+
+          // so, this transaction is failed and will be reverted as soon as the exception we caught is re-thrown.
+          assertThat(phaseSync.exceptionDetails(), startsWith("Unexpected exception org.springframework.dao.CannotAcquireLockException"));
+
+          phaseSync.ifAnyExceptionRethrow();
+        });
       });
     });
-    wait(bothTransactionsAreDone);
-    //one of the transactions is rolled back
-    assertThat(getSum(userRepository.findById(userId).orElseThrow()), is(100));
+    phaseSync.phase(Phases.SIXTH, () -> {/*done with all phases*/});
+    assertThat(phaseSync.noExceptions(), is(false));
+
+    assertThat(accountRepository.findAll().stream().mapToInt(Account::getAmount).sum(), is(60));
   }
 
-  private int getSum(User user) {
-    return user.getAccounts().stream().mapToInt(Account::getAmount).sum();
+  private void withdraw(int moneyToWithdraw, int accountIdToWithdrawFrom) {
+    Integer newAmount = accountRepository.findById(accountIdToWithdrawFrom)
+        .map(Account::getAmount)
+        .map(amount -> amount - moneyToWithdraw)
+        .filter(amount -> amount > 0)
+        .orElseThrow();
+    accountRepository.updateAmount(accountIdToWithdrawFrom, newAmount);
   }
-
-  private void wait(CountDownLatch latch) {
-    try {
-      if (!latch.await(3, TimeUnit.MINUTES)) {
-        throw new RuntimeException("Timeout exceeded");
-      }
-    } catch (InterruptedException e) {
-      e.printStackTrace();
-    }
+  
+  private boolean allowedToWithdraw(int amount) {
+    return accountRepository.findAllById(List.of(1, 2)).stream()
+        .mapToInt(Account::getAmount).sum() >= amount * 3;
   }
 
 }
