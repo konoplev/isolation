@@ -39,34 +39,36 @@ public class PhantomReadTest {
   }
 
   @Test
-  public void test() {
-    transactionsWrapper.readCommitted(() -> {
-      //given
-      var user = new User();
-      user.setUserName("someName");
-      var account1 = new Account();
-      account1.setId(1);
-      account1.setUser(user);
-      account1.setAmount(40);
-      var account2 = new Account();
-      account2.setId(2);
-      account2.setAmount(50);
-      account2.setUser(user);
-      user.setAccounts(List.of(account1, account2));
-      userRepository.saveAndFlush(user);
-    });
+  public void phantomRead() {
+    //given
+    final var amountToTransfer = 30;
+    final var firstAccountInitialAmount = 40;
+    final var secondAccountInitialAmount = 50;
+
+    var user = new User();
+    user.setUserName("someName");
+    var account1 = new Account();
+    account1.setId(1);
+    account1.setUser(user);
+    account1.setAmount(firstAccountInitialAmount);
+    var account2 = new Account();
+    account2.setId(2);
+    account2.setAmount(secondAccountInitialAmount);
+    account2.setUser(user);
+    user.setAccounts(List.of(account1, account2));
+    userRepository.saveAndFlush(user);
+
 
     //expect
     PhaseSync phaseSync = new PhaseSync();
-    final var amount = 30;
 
     runAsync(() -> {
       transactionsWrapper.repeatableRead(() -> {
         AtomicBoolean isWithdrawAllowed = new AtomicBoolean(false);
         phaseSync.phase(Phases.FIRST, () ->
-            isWithdrawAllowed.compareAndSet(false, allowedToWithdraw(amount)));
+            isWithdrawAllowed.compareAndSet(false, allowedToWithdraw(amountToTransfer)));
         if (isWithdrawAllowed.get()) {
-          phaseSync.phase(Phases.THIRD, () -> withdraw(amount, 1));
+          phaseSync.phase(Phases.THIRD, () -> withdraw(amountToTransfer, 1));
         }
       });
       phaseSync.phase(Phases.FOURTH, () -> {/* transaction is commited */});
@@ -76,9 +78,9 @@ public class PhantomReadTest {
       transactionsWrapper.repeatableRead(() -> {
         AtomicBoolean isWithdrawAllowed = new AtomicBoolean(false);
         phaseSync.phase(Phases.SECOND, () ->
-            isWithdrawAllowed.compareAndSet(false, allowedToWithdraw(amount)));
+            isWithdrawAllowed.compareAndSet(false, allowedToWithdraw(amountToTransfer)));
         if (isWithdrawAllowed.get()) {
-          phaseSync.phase(Phases.FIFTH, () -> withdraw(amount, 2));
+          phaseSync.phase(Phases.FIFTH, () -> withdraw(amountToTransfer, 2));
         }
       });
     });
@@ -89,34 +91,35 @@ public class PhantomReadTest {
   }
 
   @Test
-  public void testFix() {
-    transactionsWrapper.readCommitted(() -> {
+  public void phantomReadFix() {
       //given
-      var user = new User();
-      user.setUserName("someName");
-      var account1 = new Account();
-      account1.setId(1);
-      account1.setUser(user);
-      account1.setAmount(40);
-      var account2 = new Account();
-      account2.setId(2);
-      account2.setAmount(50);
-      account2.setUser(user);
-      user.setAccounts(List.of(account1, account2));
-      userRepository.saveAndFlush(user);
-    });
+    final var amountToTransfer = 30;
+    final var firstAccountInitialAmount = 40;
+    final var secondAccountInitialAmount = 50;
+
+    var user = new User();
+    user.setUserName("someName");
+    var account1 = new Account();
+    account1.setId(1);
+    account1.setUser(user);
+    account1.setAmount(firstAccountInitialAmount);
+    var account2 = new Account();
+    account2.setId(2);
+    account2.setAmount(secondAccountInitialAmount);
+    account2.setUser(user);
+    user.setAccounts(List.of(account1, account2));
+    userRepository.saveAndFlush(user);
 
     //expect
     PhaseSync phaseSync = new PhaseSync();
-    final var amount = 30;
 
     runAsync(() -> {
         transactionsWrapper.serializable(() -> {
           AtomicBoolean isWithdrawAllowed = new AtomicBoolean(false);
           phaseSync.phase(Phases.FIRST, () ->
-              isWithdrawAllowed.compareAndSet(false, allowedToWithdraw(amount)));
+              isWithdrawAllowed.compareAndSet(false, allowedToWithdraw(amountToTransfer)));
           if (isWithdrawAllowed.get()) {
-            phaseSync.phase(Phases.THIRD, () -> withdraw(amount, 1));
+            phaseSync.phase(Phases.THIRD, () -> withdraw(amountToTransfer, 1));
           }
         });
       phaseSync.phase(Phases.FOURTH, () -> {/* transaction is commited */});
@@ -127,9 +130,9 @@ public class PhantomReadTest {
         transactionsWrapper.serializableFallible(() -> {
           AtomicBoolean isWithdrawAllowed = new AtomicBoolean(false);
           phaseSync.phase(Phases.SECOND, () ->
-              isWithdrawAllowed.compareAndSet(false, allowedToWithdraw(amount)));
+              isWithdrawAllowed.compareAndSet(false, allowedToWithdraw(amountToTransfer)));
           if (isWithdrawAllowed.get()) {
-            phaseSync.phase(Phases.FIFTH, () -> withdraw(amount, 2));
+            phaseSync.phase(Phases.FIFTH, () -> withdraw(amountToTransfer, 2));
           }
           // we can't update the second account. the first transaction is committed and the data we used to check the constraint is stale now
           assertThat(phaseSync.noExceptions(), is(false));

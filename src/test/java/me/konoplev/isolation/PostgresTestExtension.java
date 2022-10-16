@@ -1,6 +1,9 @@
 package me.konoplev.isolation;
 
 import org.junit.jupiter.api.extension.*;
+import org.springframework.boot.test.util.TestPropertyValues;
+import org.springframework.context.ApplicationContextInitializer;
+import org.springframework.context.ConfigurableApplicationContext;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
@@ -25,13 +28,21 @@ public class PostgresTestExtension implements BeforeAllCallback, AfterAllCallbac
         .withUsername(DB_USERNAME)
         .withPassword(DB_PASSWORD)
         .withExposedPorts(DB_PORT)
-        .withReuse(true);
+        .withReuse(false);
 
     container.start();
-    System.setProperty("spring.datasource.url", container.getJdbcUrl());
-    System.setProperty("spring.datasource.username", container.getUsername());
-    System.setProperty("spring.datasource.password", container.getPassword());
-    System.setProperty("spring.jpa.properties.hibernate.dialect", "org.hibernate.dialect.PostgreSQLDialect");
+  }
+
+  public static class Initializer implements ApplicationContextInitializer<ConfigurableApplicationContext> {
+    @Override
+    public void initialize(ConfigurableApplicationContext configurableApplicationContext) {
+      TestPropertyValues.of(
+          "spring.datasource.url=" + container.getJdbcUrl(),
+          "spring.datasource.username=" + container.getUsername(),
+          "spring.datasource.password=" + container.getPassword(),
+          "spring.jpa.properties.hibernate.dialect=" + "org.hibernate.dialect.PostgreSQLDialect"
+                           ).applyTo(configurableApplicationContext.getEnvironment());
+    }
   }
 
   @Override

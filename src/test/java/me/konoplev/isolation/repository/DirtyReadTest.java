@@ -1,6 +1,7 @@
 package me.konoplev.isolation.repository;
 
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import me.konoplev.isolation.MySqlTest;
 import me.konoplev.isolation.repository.dto.Account;
@@ -16,6 +17,7 @@ import org.springframework.dao.DataIntegrityViolationException;
 import static java.util.concurrent.CompletableFuture.runAsync;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.core.IsNot.not;
 
 @MySqlTest
 class DirtyReadTest {
@@ -36,7 +38,116 @@ class DirtyReadTest {
   }
 
   @Test
-  public void test() throws Exception {
+  public void dirtyRead() {
+    //given
+    final var amountToTransfer = 30;
+    final var firstAccountInitialAmount = 40;
+    final var secondAccountInitialAmount = 50;
+
+    var user = new User();
+    user.setUserName("someName");
+    var account1 = new Account();
+    account1.setId(1);
+    account1.setUser(user);
+    account1.setAmount(firstAccountInitialAmount);
+    var account2 = new Account();
+    account2.setId(2);
+    account2.setAmount(secondAccountInitialAmount);
+    account2.setUser(user);
+    user.setAccounts(List.of(account1, account2));
+    userRepository.saveAndFlush(user);
+
+    // expect
+    PhaseSync phaseSync = new PhaseSync();
+    runAsync(() -> {
+      transactionsWrapper.readUncommitted(() -> {
+        phaseSync.phase(Phases.FIRST, () ->
+                accountRepository.updateAmount(1, firstAccountInitialAmount - amountToTransfer)
+                       );
+        phaseSync.phase(Phases.THIRD, () ->
+                accountRepository.updateAmount(2, secondAccountInitialAmount + amountToTransfer)
+                       );
+
+      });
+    });
+
+    final AtomicInteger firstAccountAmount = new AtomicInteger(0);
+    final AtomicInteger secondAccountAmount = new AtomicInteger(0);
+    runAsync(() -> {
+      transactionsWrapper.readUncommitted(() -> {
+        phaseSync.phase(Phases.SECOND, () -> {
+          accountRepository.findById(1).map(Account::getAmount)
+              .ifPresent(amount -> firstAccountAmount.compareAndSet(0, amount));
+          accountRepository.findById(2).map(Account::getAmount)
+              .ifPresent(amount -> secondAccountAmount.compareAndSet(0, amount));
+        });
+      });
+    });
+
+    phaseSync.phase(Phases.FOURTH, () -> {/* all phases are done*/});
+    assertThat(phaseSync.exceptionDetails(), phaseSync.noExceptions(), is(true));
+    assertThat(firstAccountAmount.get() + secondAccountAmount.get(),
+        not(firstAccountInitialAmount + secondAccountInitialAmount));
+
+    assertThat(firstAccountAmount.get() + secondAccountAmount.get(),
+        is(firstAccountInitialAmount + secondAccountInitialAmount - amountToTransfer));
+  }
+
+  @Test
+  public void dirtyReadFix() {
+    //given
+    final var amountToTransfer = 30;
+    final var firstAccountInitialAmount = 40;
+    final var secondAccountInitialAmount = 50;
+
+    var user = new User();
+    user.setUserName("someName");
+    var account1 = new Account();
+    account1.setId(1);
+    account1.setUser(user);
+    account1.setAmount(firstAccountInitialAmount);
+    var account2 = new Account();
+    account2.setId(2);
+    account2.setAmount(secondAccountInitialAmount);
+    account2.setUser(user);
+    user.setAccounts(List.of(account1, account2));
+    userRepository.saveAndFlush(user);
+
+    // expect
+    PhaseSync phaseSync = new PhaseSync();
+    runAsync(() -> {
+      transactionsWrapper.readUncommitted(() -> {
+        phaseSync.phase(Phases.FIRST, () ->
+                accountRepository.updateAmount(1, firstAccountInitialAmount - amountToTransfer)
+                       );
+        phaseSync.phase(Phases.THIRD, () ->
+                accountRepository.updateAmount(2, secondAccountInitialAmount + amountToTransfer)
+                       );
+
+      });
+    });
+
+    final AtomicInteger firstAccountAmount = new AtomicInteger(0);
+    final AtomicInteger secondAccountAmount = new AtomicInteger(0);
+    runAsync(() -> {
+      transactionsWrapper.readCommitted(() -> {
+        phaseSync.phase(Phases.SECOND, () -> {
+          accountRepository.findById(1).map(Account::getAmount)
+              .ifPresent(amount -> firstAccountAmount.compareAndSet(0, amount));
+          accountRepository.findById(2).map(Account::getAmount)
+              .ifPresent(amount -> secondAccountAmount.compareAndSet(0, amount));
+        });
+      });
+    });
+
+    phaseSync.phase(Phases.FOURTH, () -> {/* all phases are done*/});
+    assertThat(phaseSync.exceptionDetails(), phaseSync.noExceptions(), is(true));
+    assertThat(firstAccountAmount.get() + secondAccountAmount.get(),
+        is(firstAccountInitialAmount + secondAccountInitialAmount));
+  }
+
+  @Test
+  public void readDataThatIsRolledBack() {
     //given
     transactionsWrapper.readCommitted(() -> {
       var user = new User();

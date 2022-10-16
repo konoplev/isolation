@@ -13,6 +13,7 @@ public class PhaseSync {
   private final ExecutionExceptionsKeeper<Phases> executionExceptionsKeeper = new ExecutionExceptionsKeeper<>();
 
   public void phase(Phases phase, FallibleFunction execution) {
+    System.out.println(phase + " is created");
     phase(phase, execution, (e) -> executionExceptionsKeeper.handleUnexpectedException(phase, e));
   }
 
@@ -71,19 +72,24 @@ public class PhaseSync {
     lock.lock();
     try {
       while (currentPhase != phase) {
-        if (!phaseIsDone.await(5, TimeUnit.SECONDS)) {
+        if (!phaseIsDone.await(10, TimeUnit.SECONDS)) {
           exceptionHandler.accept(new Exception("Timeout waiting for " + phase));
           return;
         }
+        System.out.println(phase + " is awaken and going to check if it's next");
       }
+      System.out.println(phase + " is executing");
       executeAndHandleExceptions(execution, exceptionHandler);
 
       if (currentPhase.hasNext()) {
         currentPhase = currentPhase.next();
       }
+      System.out.println("We're about to switch to " + currentPhase);
       phaseIsDone.signalAll();
     } catch (InterruptedException e) {
       throw new RuntimeException("Thread interrupted");
+    } catch (Throwable e) {
+      System.out.println(e);
     } finally {
       lock.unlock();
     }

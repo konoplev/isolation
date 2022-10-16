@@ -1,53 +1,32 @@
 = Transactions and isolation levels
-Alexander Konoplev
-v 1.0, 09-06-2020
-:tags: concurrency
 
-
-[allure]
-The main problem with relational databases is that any developer implementing an application executing SQL queries should understand how DB works under the hood, why and when to start transactions and what's the difference between isolation levels. Read this post if you're not sure what are the proper answers to these questions.
+The main problem with relational databases is that any developer implementing an application executing SQL queries should understand how DB works under the hood, why and when to start transactions, and what's the difference between isolation levels. So, that's not enough to just know SQL or some ORM. Read this post if you're not sure what are the proper answers to the above questions. Also, we will discuss some differences between relational database implementations. You'll see, for example, that `REPEATABLE_READ` and `READ_UNCOMMITED` work differently in MySQL and Postgress. The discussion is very practical. There are lots of examples. For instance, we not just talk about pessimistic and optimistic locking but also when it's crucial for your application. I hope this post will clarify all questions that you had about transactions.
 
 == Why transactions?
 
-One of big German banks has a mobile application allowing to create sub-accounts besides the main account. So, you can transfer money from the main account to a sub-account to, for example, save up money for some purpose. But money transferring from main account to the sub-account takes a lot of time (days) for some reason. So after the transferring process is started it looks like the money are gone from your main account and disappeared. Eventually the sub-account will receive the money, but until then it looks like your money are just gone. To avoid such cases transactions were introduced (but, as you see, still not used everywhere).
+One of the big German banks has a mobile application allowing users to create sub-accounts besides the main account. So, you can transfer money from the main account to a sub-account to, for example, save up money for some purpose. But money transferring from the main account to the sub-account takes a lot of time (days) for some reason. So you have enough time to notice that after the transfer process is started, the money is gone from your main account, and disappeared. Eventually, the sub-account will receive the money, but until then, it looks like your money is just gone. To avoid such cases, transactions were introduced (but, as you see, still not used everywhere).
 
-What we have here is a concurrent execution of two different actions. The first one is money transferring (let's call it T), the second one is getting amount of money on all sub-accounts (let's call it G). This is how it looks like on the diagram.
-
-So, as you can see, since the T is too slow, the G is able to see the Main account after the money are gone but the sub-account before the money come. So, for G there are less money on 2 accounts than in reality, the data is inconsistent. When T is done with both operations, G can check both accounts again and see that the money are actually transferred, so the data is consistent again. This situation is called _eventual consistency_.
-
-Another potential problem would be that T removed the money from main account but crushed afterwords. If there is no evidence that the second operation is never performed then nobody will try to perform it. So the money are gone and the data will never be consistent again.
-
-To avoid both problems transactions were introduced.
-
-== What is transaction?
+== What is a transaction?
 
 A transaction is a way to execute one or many operations atomically and isolated.
 
 === Atomicity
 
-So, each transaction has a beginning, the set of operations and an end. What does the atomically mean? It means that either all operations between the beginning and the end are executed or all operations are reverted. The operations can't be applied partially. So, in our example, in case something happened and the sub-account is not updated, the change made on the main account is reverted. Both accounts should be updated or no changes are made in case one of the operations failed. So, the end of each transaction is "commit" in case all operations are successful or "rollback" in case there was any failure.
+Each transaction has a beginning, a set of operations, and an end. As we mentioned in https://konoplev.me/en/programming/post/thread_racing.html#_atomicity[the previous post], atomicity means that either all operations between the beginning and the end are executed or all operations are reverted. The operations can't be applied partially. In our example, in case something happened and the sub-account is not updated, the change made on the main account should be reverted. Both accounts should be updated or no changes are made in case one of the intermediate operations failed. So, the end of each transaction is "commit" (all changes are persisted in the database) in case all operations are successful or "rollback" (no changes are persisted in the database) in case there was any failure.
 
 === Isolation
 
-What does the isolated mean? This means that despite any changes that parallel transactions make, each transaction has its own snapshot of the database that is not changed while the transaction operations are executed. So, between the beging and the commit/rollback each transaction see's only its own changes. So, isolation means that from each transaction's point of view the transactions are executed sequentially even if in the reality the transactions are executed in parallel. In our example the transaction G sees all the changes made by transaction T (like G started after T) or no changes made by transaction T (like G started before T).
+Atomicity is not an issue when transactions are executed sequentially. But to improve performance most relational databases allow multiple transactions to run in parallel (to get them done faster or utilize resources better).
+
+When transactions have no intersections (change and read different rows) they can be safely executed in parallel without any additional protection. So by default, DBs usually do very minimal checks.
+
+What if two transactions read or write the same data? Because of the parallel execution, some changes of some transactions could be not atomic (in our example, one transaction sees partial changes of another). Isolation regulates what kind of changes of shared data made before "commit" by one transaction are visible for another.
+So, when developers know that some particular transaction could potentially use stale or partially written data, they should be able to ask DB to provide a way to isolate the transaction and avoid modifications based on wrong data. There are different cases and so, different isolation layers. Below we check them in detail. Why do we need different levels? As we already mentioned preventing race conditions usually degrades performance, so it's up to developers to find a trade-off between keeping consistency and performance.
 
 === ACID?
-Atomicity and Isolation are A and I from the famose ACID acronym. In relation databases data is represented as tables linked to other tables (using secondary and primary keys). So, very often changes made in one table require linked tables change or changes in the same table but other rows. All these changes as we've seen have to be atomic and isolated, otherwise the data could become inconsistent. So, the consistency is C from ACID. What is D? It's durability. Database guarantees that any data written into database can be fetched later. Obviously database itself can't guarantee C and D. D depends on physical storage, for example. In case the disc is broken, the data stored on this disc can't be fetched anymore. And database can't guarantee C. Below we describe in details why.
+Atomicity and Isolation are A and I from the famous ACID acronym. In relational databases data is represented as tables linked to other tables (using secondary and primary keys). So, very often changes made in one table require linked tables change or changes in the same table but other rows. All these changes as we've seen have to be atomic and isolated, otherwise, the data could become inconsistent. The consistency is C from ACID. What is D? It's durability. A database guarantees that any data written into the database can be fetched later. Obviously, a database itself can't guarantee C and D. D depends on physical storage, for example. In case the disc is broken, the data stored on this disc can't be fetched anymore. And the database can't guarantee C. As we mentioned, the only way to try to achieve C automatically is to execute transactions sequentially. But even in this case, a user could just write some inconsistent data because of bugs in the application.
 
-Summarizing, the ACID is more a marketing term. From technical point of view only atomicity and isolation makes sense.
-
-== Concurrent access and potential issues
-
-The issue we described above is called a race condition. Any race condition's prerequisites are two actors accessing the same data in parallel. One of the actors is changing the data and another one is reading it. Depending on timing the actor reading the data can get it in an inconsistent state because it's partially changed by the update. Even if the data will become consistent after the update is done, the reading actor could make wrong decisions based on the inconsistent data. So, race conditions should be avoided or handled properly.
-
-=== Can't we just run things sequentially to avoid race conditions?
-
-Yes, we can. But, in case there are multiple clients or calls are made from parallel threads, each request to the database should wait until all other requests are served. So, the database quickly become a bottleneck. It's possible to implement a database that is strictly consistent and automatically guarantees C from ACID, but this DB would perform much slower than a DB that is able to handle parallel requests.
-
-=== Isolation vs performance tradeoff
-
-To avoid race conditions DBs provide different ways of protecting data from concurrent modification and reading. Why different? As we already mentioned preventing race conditions usually degradates performance.
-When transactions have no intersections (change and read different rows) they can be safely executed in parallel without any additional protection. That's why by default DBs usually do very minimal checks. But when developers know that some particular transaction could potentially use stale data, they should be able to ask DB to provide a way to isolate the transaction and avoid modifications based on stale data. There are different cases and so, different isolation layers. Below we check them in details.
+Summarizing, ACID is more of a marketing term. From the technical point of view, only atomicity and isolation make sense.
 
 == Types of race conditions and isolation layers allowing to avoid them
 
@@ -70,23 +49,23 @@ Now open two terminal windows and run the following command in them
 docker exec -it $container_id /usr/bin/psql -U postgres
 ----------------------
 
-In one of the terminals run the commands from https://xxx create.sql [this file] to create the tables we're going to use in our examples.
+In one of the terminals run the commands from https://github.com/konoplev/isolation/blob/master/create.sql[this file] to create the tables we're going to use in our examples.
 
-So, you have two parallel terminals to simulate two parallel clients sending instructions concurrently.
+So, you have two parallel terminals to simulate two parallel clients sending instructions concurrently. The commands can be found in test logs.
 ====
 
 ==== Some implementation details
-I use https://spring.io/projects/spring-boot[Spring Boot] to implement all examples. This framework allows us to focus on important details and hide boring low level things behind abstractions. Also, we're going to use great tool called https://www.testcontainers.org[TestContainers] to be able to execute our examples in different databases (MySQL and Postgres) and discover some database specific aspects.
+I use https://spring.io/projects/spring-boot[Spring Boot] to implement all examples. This framework allows us to focus on important details and hide boring low-level things behind abstractions. Also, we're going to use a great tool called https://www.testcontainers.org[TestContainers] to be able to execute our examples in different databases (MySQL and Postgres) and discover some database-specific aspects.
 
-If you're not familiar with Spring Boot and test containers below is short description of some features you need to know to proceed.
+If you're not familiar with Spring Boot and test containers below is a short description of some features you need to know to proceed.
 
-Spring data provides an annotations called `@Transactional`. Any methods marked by this annotation and processed by Spring Data will be automatically wrapped in a transaction. There are multiple parameters of the annotation, but most important for us are `isolation` and `propagation`. The `propagation` allows to specify how to deal with existing transaction. We change the default behaviour (which is to use the existing transaction) to create a new transaction each time. This is how we guarantee that each method is executed in a separate transaction. The `isolation` allows to specify the isolation level. We created https://xxx/TransactionsWrapper.java[wrappers] for each isolation level, so we can simply call a method and execute a lambda passed into the method in a separate transaction with specified isolation level.
+Spring data provides an annotation called `@Transactional`. Any methods marked by this annotation and processed by Spring Data will be automatically wrapped in a transaction. There are multiple parameters of the annotation, but the most important for us are `isolation` and `propagation`. The `propagation` allows specifying how to deal with the existing transaction. We change the default behavior (which is to use the existing transaction) to create a new transaction each time. This is how we guarantee that each method is executed in a separate transaction. The `isolation` allows specifying the isolation level. We created https://github.com/konoplev/isolation/blob/master/src/main/java/me/konoplev/isolation/util/TransactionsWrapper.java[wrappers] for each isolation level, so we can simply call a method and execute a lambda passed into the method in a separate transaction with specified isolation level.
 
-To be able to run our examples with a specific database we created `@MySqlTest` and `@PostgresTest` annotations with corresponding https://xxx/MySqlTestExtension.class[MySqlTestExtension.class] and https://xxx/PostgresTestExtension[PostgresTestExtension.class] extensions. The extensions use test containers to start a docker container with one of the databases. So, each example is an annotated JUnit test running with a real database.
+To be able to run our examples with a specific database we created `@MySqlTest` and `@PostgresTest` annotations with corresponding https://github.com/konoplev/isolation/blob/master/src/test/java/me/konoplev/isolation/MySqlTestExtension.java[MySqlTestExtension.class] and https://github.com/konoplev/isolation/blob/master/src/test/java/me/konoplev/isolation/PostgresTestExtension.java[PostgresTestExtension.class] extensions. The extensions use test containers to start a docker container with one of the databases. So, each example is an annotated JUnit test running with a real database.
 
-To be able to reproduce any race conditions we use https://github.com/konoplev/mutex/blob/master/src/main/java/phases/PhaseSync.java[PhaseSync.java] that we created previously. See details about it in https://github.com/konoplev/mutex#practice[the previous blog post]. Basically the class allows reproducing race conditions by splitting a sequence of steps leading to an inconsistent state into several phases that a run by several actors (threads or, in our case, transactions).
+To be able to reproduce any race conditions we use https://github.com/konoplev/mutex/blob/master/src/main/java/phases/PhaseSync.java[PhaseSync.java] that we created previously. See details about it at https://github.com/konoplev/mutex#practice[the previous blog post]. Basically, the class allows reproducing race conditions by splitting a sequence of steps leading to an inconsistent state into several phases that a run by several actors (threads or, in our case, transactions). Each transaction runs in a separate thread (We use `CompletableFuture.runAsync(java.lang.Runnable)` for it. See my https://konoplev.me/en/programming/post/the_hidden_life_of_threads.html#_thread_pool#[post about threads] if you need more details). In all examples, we have two `runAsync` calls and two transactions.
 
-=== The example
+===== The database schema
 To demonstrate race conditions and isolation levels preventing them I created a simple example. We have an entity User
 
 [source, java]
@@ -109,7 +88,7 @@ public class User {
 }
 ------------
 
-As you can see a user could have some accounts (one to many relationship). And account is just a storage for some amount of money. This is how it looks like:
+As you can see a user could have some accounts (one to many relationships). And the account is just a storage for some amount of money. This is what it looks like:
 
 [source, java]
 ------------
@@ -132,21 +111,93 @@ public class Account {
 }
 ------------
 
-In all examples we just have one user and transfer money from one user's account to another.
+In all examples, we just have one user and transfer money from one user's account to another.
 
-To store/fetch data to/from corresponding tables we use `AccountRepository` and `UserRepository`. Both are standard JpaRepositories.
+To store/fetch data to/from corresponding tables we use `AccountRepository` and `UserRepository`. Both are standard JpaRepositories. To simplify things we add a method allowing to update account table. We'll need it for the "transfers".
+
+[source, java]
+-----------------
+public interface AccountRepository extends JpaRepository<Account, Integer> {
+
+  @Modifying(clearAutomatically = true)
+  @Query("update Account a set a.amount = :newAmount where a.id = :id")
+  void updateAmount(@Param("id") Integer id, @Param("newAmount") int newAmount);
+}
+-----------------
 
 === Dirty read
 
-To demonstrate the dirty read we create a user without accounts. Please note, that according to our schema each user should have a unique username. Then we start two transactions (running in parallel threads) with "read uncommitted" isolation levels. It means that any changes made by one transaction are immediately visible to another.
+Any changes made by any parallel transaction are immediately visible to the `READ_UNCOMMITTED` one. Sometimes it makes data inconsistent for the `READ_UNCOMMITTED` transaction. It's called dirty read.
+
+We already discussed an example at the beginning of the post. The first (writing) transaction transfers money from one account to another and the second (reading) transaction having `READ_UNCOMMITTED` isolation level sees the system at the moment when money is gone from one account but has not been received by another. So, for the `READ_UNCOMMITTED` there is less money in the system than it is in reality. Let's implement it
+
+[source, java]
+------------------
+  //given
+    final var amountToTransfer = 30;
+    final var firstAccountInitialAmount = 40;
+    final var secondAccountInitialAmount = 50;
+
+    var user = new User();
+    user.setUserName("someName");
+    var account1 = new Account();
+    account1.setId(1);
+    account1.setUser(user);
+    account1.setAmount(firstAccountInitialAmount);
+    var account2 = new Account();
+    account2.setId(2);
+    account2.setAmount(secondAccountInitialAmount);
+    account2.setUser(user);
+    user.setAccounts(List.of(account1, account2));
+    userRepository.saveAndFlush(user);
+
+    // expect
+    PhaseSync phaseSync = new PhaseSync();
+    runAsync(() -> {
+      transactionsWrapper.readUncommitted(() -> {
+        phaseSync.phase(Phases.FIRST, () ->
+                accountRepository.updateAmount(1, firstAccountInitialAmount - amountToTransfer)
+                       );
+        phaseSync.phase(Phases.THIRD, () ->
+                accountRepository.updateAmount(2, secondAccountInitialAmount + amountToTransfer)
+                       );
+
+      });
+    });
+
+    final AtomicInteger firstAccountAmount = new AtomicInteger(0);
+    final AtomicInteger secondAccountAmount = new AtomicInteger(0);
+    runAsync(() -> {
+      transactionsWrapper.readUncommitted(() -> {
+        phaseSync.phase(Phases.SECOND, () -> {
+          accountRepository.findById(1).map(Account::getAmount)
+              .ifPresent(amount -> firstAccountAmount.compareAndSet(0, amount));
+          accountRepository.findById(2).map(Account::getAmount)
+              .ifPresent(amount -> secondAccountAmount.compareAndSet(0, amount));
+        });
+      });
+    });
+
+    phaseSync.phase(Phases.FOURTH, () -> {/* all phases are done*/});
+    assertThat(phaseSync.exceptionDetails(), phaseSync.noExceptions(), is(true));
+    assertThat(firstAccountAmount.get() + secondAccountAmount.get(),
+        not(firstAccountInitialAmount + secondAccountInitialAmount));
+
+    assertThat(firstAccountAmount.get() + secondAccountAmount.get(),
+        is(firstAccountInitialAmount + secondAccountInitialAmount - amountToTransfer));
+------------------
+
+As you can see the second (reading) transaction sees less money in the system. The `amountToTransfer` is hidden.
+
+Another problem is that a `READ_UNCOMMITTED` transaction could read and use some data that is rolled back by another transaction later. In the below example, we create a user without accounts and start two transactions with `READ_UNCOMMITED` isolation levels. Please note, that according to our schema each user should have a unique username.
 Here is what happens next:
 
 1. The second transaction checks that there are 0 accounts in the system. That's expected.
 2. The first transaction creates an account with some amount.
 3. The second transaction checks that now there is one account in the system. Since the transactions have "read uncommitted" that's also expected and probably fine.
-4. The first transaction create a user with the same username that the existent user has. When we try to store this user we get `DataIntegrityViolationException`. We can't have two users with the same username.
-5. The whole transaction violated the integrity is reverted. It means the changes to create the account is reverted as well.
-6. The second transaction checks number of accounts. It's 0 again. So, the first transaction was able to see the changes that violated consistency and were reverted. In most cases that's not what you want.
+4. The first transaction creates a user with the same username that the existing user has. When we try to store this user we get `DataIntegrityViolationException`. We can't have two users with the same username.
+5. The whole transaction violated the integrity is reverted. It means the changes to create the account are reverted as well.
+6. The second transaction checks the number of accounts. It's 0 again. So, the first transaction was able to see the changes that violated consistency and were reverted.
 
 [source, java]
 -------------------
@@ -210,173 +261,314 @@ Here is what happens next:
 
 -------------------
 
-No transactions should be able to see changes made by a transaction that break consistency and is reverted because of that.
+No transactions should be able to see changes made by a transaction that breaks consistency and is reverted because of that.
 
 ==== To fix
-How to fix the issue? There is a stricter level called READ_COMMITTED. But which transaction should have this level to fix the issue? The first transaction, the second or both? You can guess from the name that we need to change the reading transaction. So, it's enough to change the level of the second transaction.
+How to fix the issue? There is a stricter level called READ_COMMITTED. But which transaction should have this level to fix the issue? The first (writing) transaction, the second (reading), or both? You can guess from the name that we need to change the reading transaction. So, it's enough to change the level of the second transaction.
 
-Also, note that the test is annotated with `@MySqlTest`. Try to change it to `@PostgresTest` and you'll get the test failed. Why? There is no `READ_UNCOMMITED` level in postgres. The weakest level is `READ_COMMITTED`, so even if you run transaction with `READ_UNCOMMITED` level it will be interpreted by Postgres as `READ_COMMITTED`. That's why it's crucial to test your code with real databases. There are some important details.
+Also, note that the test is annotated with `@MySqlTest`. Try to change it to `@PostgresTest` and you'll get the test failed. Why? There is no `READ_UNCOMMITED` level in Postgres. The weakest level is `READ_COMMITTED`, so even if you run a transaction with `READ_UNCOMMITED` level it will be interpreted by Postgres as `READ_COMMITTED`. That's why it's crucial to test your code with real databases. There are some important details.
 
 ==== When READ_UNCOMMITED is ok
 
-1. When you're fine to read eventually consistent data. For example, you log some info about users visiting your web-site to show some statistics about the users on some dashboard. You're probably fine if the data is slightly not up to date or not consistent for a moment.
-2. You insert records to one table and never update this data. Both reading and writing transactions can be READ_UNCOMMITED but still have consistent data. Why? DBs guarantee that data is atomic on a row level (a row can't be written partially). Since the data is never updated, no transactions can make it inconsistent.
+1. When you're fine to read eventually consistent data. For example, you log some info about users visiting your website to show some statistics about the users on some dashboard. You're probably fine if the data is slightly not up to date or not consistent for a moment.
+2. You insert records into one table and never update this data. Both reading and writing transactions can be READ_UNCOMMITED but still have consistent data. Why? DBs guarantee that data is atomic on a row level (a row can't be written partially). Since the data is never updated, no transactions can make it inconsistent.
+3. When you know that there are no transactions that touch the same data. But be careful with that. You never know when it's changed. Cover your code with tests to catch it.
 
-As you can see both cases are very rare. So, READ_UNCOMMITED is for very edge cases.
+As you can see that all cases are very rare. So, READ_UNCOMMITED is for very edge cases.
 
 === Non-repeatable Read
 
-Does `READ_COMMITTED` mean that we always read consistent data? Unfortunately, not. Imagine that we have an account stored in our system and two transactions going to modify it. The first one fetches the account, charges some fee from it and store the new amount (which is old amount - fee). The second transaction is started by user's request. The user decided to leave the system and remove all accounts. What happens in this case? Well, depends on the order different things can happen. And if the result depends on the order it means that we have a race condition here.
+Does `READ_COMMITTED` mean that we always read consistent data? Unfortunately, not. The same case: The first (writing) transaction transfers money from one account to another and the second (reading) transaction having `READ_COMMITTED` gets a sum of money on both accounts. The result still depends on the order. What if the reading transaction gets the amount from the first account before the writing transaction started and gets the amount from the second account after the writing transaction is committed?
 
-One of the scenarios.
-1. First transaction fetches the account to check that it has enough money to be charged.
-2. Second transaction removes the account. So, user can receive whole amount of money from the account.
-3. The first transaction charges the fee. Since the data is already read, this transaction doesn't know that the account is removed. The update query is run and nothing is changed (since there is no account already). Then the transaction stores the charged amount of money in some system account. So, the system thinks that the money has been actually charged. We get the system is an inconsistent state.
+0. Account 1 has 40, and Account 2 has 50.
+1. The reading transaction reads 40 from Account 1
+2. The writing transaction transfers 30 from Account 1 to Account 2 and commits. So, Account 1 has 10, Account 2 has 80. The transaction is committed. So, the changes are available for the reading transaction.
+3. The reading transaction reads 80 from Account 2.
 
-[source, java]
---------------------
-    //given
-    final int userAccountId = 1;
-    final int systemAccountId = 2;
-    final int amount = 100;
-    transactionsWrapper.readCommitted(() -> {
-      var account = new Account();
-      account.setAmount(amount);
-      account.setId(userAccountId);
-      accountRepository.saveAndFlush(account);
-      var systemAccount = new Account();
-      systemAccount.setAmount(0);
-      systemAccount.setId(systemAccountId);
-      accountRepository.saveAndFlush(systemAccount);
-    });
-    final var fee = 10;
-
-    //expected
-    var phaseSync = new PhaseSync();
-    runAsync(() ->
-            phaseSync.phase(Phases.SECOND, () ->
-                    transactionsWrapper.readUncommitted(() -> accountRepository.deleteById(userAccountId))
-                           )
-            );
-
-    transactionsWrapper.readCommitted(() -> {
-      AtomicInteger existingAmount = new AtomicInteger();
-      phaseSync.phase(Phases.FIRST,
-          () -> accountRepository.findById(userAccountId).map(Account::getAmount).ifPresent(a -> existingAmount.compareAndSet(0, a)));
-
-      // there is the account with expected amount
-      assertThat(existingAmount.get(), is(amount));
-
-      //now another transaction runs in parallel and removes the record
-
-      // there is no such record anymore. but the transaction thinks there is
-      phaseSync.phase(Phases.THIRD, () -> accountRepository.updateAmount(userAccountId, amount - fee));
-
-      // the account has not been actually updated, but we're not aware of it
-      assertThat(phaseSync.noExceptions(), is(true));
-
-      // and we store the fee that we charged to our system account making the data inconsistent
-      accountRepository.updateAmount(systemAccountId, fee);
-
-      // the only way to find out that the account has been removed is to search for it one more time
-      // but the application code shouldn't check for data consistency. it's database's responsibility
-      assertThat(accountRepository.existsById(userAccountId), is(false));
-    });
-
-    phaseSync.phase(Phases.FOURTH, () -> {/*done with all phases*/});
-    assertThat(phaseSync.exceptionDetails(), phaseSync.noExceptions(), is(true));
-    assertThat(accountRepository.findById(systemAccountId).map(Account::getAmount).orElseThrow(), is(fee));
---------------------
-
-==== To fix
-
-In our example while the first transaction is executing, the second transaction changes the data that the first transaction has read. The data is changed and committed. So if the first transaction had read this data again, the result of reading would have been different. The read is not repeatable. The next isolation level is `REPEATABLE_READ`. It requests database to fail any transaction that operates with stolen data. In our case, we receive `CannotAcquireLockException` exception as soon as the system account update query tries to execute because the fetched data is changed by another transaction.
+So, from the reading transaction point of view, there is more money in the system than in reality.
 
 [source, java]
-----------------
+---------------
     //given
-    final int userAccountId = 1;
-    final int systemAccountId = 2;
-    final int amount = 100;
-    transactionsWrapper.readCommitted(() -> {
-      var account = new Account();
-      account.setAmount(amount);
-      account.setId(userAccountId);
-      accountRepository.saveAndFlush(account);
-      var systemAccount = new Account();
-      systemAccount.setAmount(0);
-      systemAccount.setId(systemAccountId);
-      accountRepository.saveAndFlush(systemAccount);
-    });
+    final var amountToTransfer = 30;
+    final var firstAccountInitialAmount = 40;
+    final var secondAccountInitialAmount = 50;
+
+    var user = new User();
+    user.setUserName("someName");
+    var account1 = new Account();
+    account1.setId(1);
+    account1.setUser(user);
+    account1.setAmount(firstAccountInitialAmount);
+    var account2 = new Account();
+    account2.setId(2);
+    account2.setAmount(secondAccountInitialAmount);
+    account2.setUser(user);
+    user.setAccounts(List.of(account1, account2));
+    userRepository.saveAndFlush(user);
 
     //expected
-    var phaseSync = new PhaseSync();
-    runAsync(() ->
-            phaseSync.phase(Phases.SECOND, () ->
-                    transactionsWrapper.readUncommitted(() -> accountRepository.deleteById(userAccountId))
-                           )
-            );
+    PhaseSync phaseSync = new PhaseSync();
 
-    assertThrows(CannotAcquireLockException.class, () -> {
-      // the fix is to change readCommitted to repeatableRead
-      transactionsWrapper.repeatableReadFallible(() -> {
-        AtomicInteger existingAmount = new AtomicInteger();
-        phaseSync.phase(Phases.FIRST,
-            () -> accountRepository.findById(userAccountId).map(Account::getAmount).ifPresent(a -> existingAmount.compareAndSet(0, a)));
+    runAsync(() -> {
+      phaseSync.phase(Phases.SECOND, () ->
+          transactionsWrapper.readCommitted(() -> {
+            accountRepository.updateAmount(1, firstAccountInitialAmount - amountToTransfer);
+            accountRepository.updateAmount(2, secondAccountInitialAmount + amountToTransfer);
+          }));
+    });
 
-        // there is the account with expected amount
-        assertThat(existingAmount.get(), is(amount));
-
-        //now another transaction runs in parallel and removes the record
-
-        // there is no such record anymore. but the transaction thinks there is
-        final var fee = 10;
-        phaseSync.phase(Phases.THIRD, () -> accountRepository.updateAmount(userAccountId, amount - fee));
-
-        // the account can't be updated because the state we had before we started the transaction is changed by another parallel transaction
-        assertThat(phaseSync.noExceptions(), is(false));
-
-        // so, this transaction is failed and will be reverted as soon as the exception we caught is re-thrown.
-        assertThat(phaseSync.exceptionDetails(), startsWith("Unexpected exception org.springframework.dao.CannotAcquireLockException"));
-
-        phaseSync.ifAnyExceptionRethrow();
-
-        // the update bringing the system to the inconsistent state is not executed
-        accountRepository.updateAmount(systemAccountId, fee);
+    final AtomicInteger firstAccountAmount = new AtomicInteger(0);
+    final AtomicInteger secondAccountAmount = new AtomicInteger(0);
+    runAsync(() -> {
+      transactionsWrapper.readCommitted(() -> {
+        //read before another transaction started
+        phaseSync.phase(Phases.FIRST, () ->
+            accountRepository.findById(1).map(Account::getAmount)
+                .ifPresent(amount -> firstAccountAmount.compareAndSet(0, amount)));
+        //we need to clear caches, otherwise we can read cached value
+        entityManager.clear();
+        //read after another transaction finished
+        phaseSync.phase(Phases.THIRD, () ->
+            accountRepository.findById(2).map(Account::getAmount)
+                .ifPresent(amount -> secondAccountAmount.compareAndSet(0, amount)));
       });
     });
 
-    phaseSync.phase(Phases.FOURTH, () -> {/*done with all phases*/});
-    assertThat(accountRepository.findById(systemAccountId).map(Account::getAmount).orElseThrow(), is(0));
+    phaseSync.phase(Phases.FOURTH, () -> {/* all phases are done*/});
+    assertThat(phaseSync.exceptionDetails(), phaseSync.noExceptions(), is(true));
+    assertThat(firstAccountAmount.get() + secondAccountAmount.get(),
+        not(firstAccountInitialAmount + secondAccountInitialAmount));
 
+    assertThat(firstAccountAmount.get() + secondAccountAmount.get(),
+        is(firstAccountInitialAmount + secondAccountInitialAmount + amountToTransfer));
+---------------
+
+==== To fix
+
+In our example, while the reading transaction is executing, the writing transaction changes the data that the reading transaction has already read. The data is changed and committed. So if the reading transaction had read this data again, the result of the reading would have been different. The read is not repeatable. The next isolation level is `REPEATABLE_READ`. It makes the read repeatable. So, the reading transaction is isolated from the writing transaction. It means that even though the transaction is executed in parallel, the result for the reading transaction looks like the execution was sequential. How does it work?
+
+==== MVCC. How the `REPEATABLE_READ` works under the hood
+
+How would you implement the `REPEATABLE_READ`? How to detect that there is another transaction that updated the row that our transaction used to make a decision?
+
+There is an elegant solution called MVCC (Multiversion concurrency control). Let's assign a unique identifier to each transaction. The identifier is always-increasing, so if transaction A started before transaction B, then A's id is lower than B's id. The changes are not immediately written into rows. We add transaction id to the row's data. So when some row is inserted we add the corresponding transaction id to it. When it's updated we keep both the old version (with the old transaction id) and the updated version with the new transaction id. And when some row is removed, we don't remove it but mark it as removed with the corresponding transaction id.
+
+The versioning allows us to create a virtual snapshot of the whole DB for each transaction. It doesn't matter how many parallel transactions are running and which rows are changed by them. Each transaction "sees" its own DB snapshot taken at the time the transaction is started. A transaction is allowed to "see" only rows that have an id less than the transaction's id and that were committed already at the time the transaction started. So, for each transaction the DB:
+
+1. creates a list of all in-progress transactions
+2. any writes made by these transactions are ignored
+3. any writes made by transactions with a later transaction id (started after the current transaction is started, so not in the in-progress list) are also ignored
+
+The 1 + 2 make a transaction `READ_COMMITTED`. The 1 + 2 + 3 make a transaction `REPEATABLE_READ`.
+
+Let's see how `REPEATABLE_READ` works in our example:
+
+0. The transaction inserting the initial data is executed. Say the transaction has T0 id. So Account 1 has 40 (and version T0), and Account 2 has 50 (and version T0).
+1. The reading transaction (T1) is started. The `in-progress` list is empty. Nothing to ignore. It reads 40 from Account 1 (version T0 is visible for T1)
+2. The writing transaction (T2) is started. The `in-progress` contains T1 (but there will be no rows committed by T1 because it's read-only, so nothing to ignore as well). T2 transfers 30 from Account 1 to Account 2 and commits. So, there are 2 versions of both accounts. Additionally to T0: Account 1 has 10 (and version T2), and Account 2 has 80 (and version T2).
+3. The reading transaction reads the amount from Account 2. There are two versions of this account, but the T2 version is not visible for the reading transaction because it has a lower id T1. So the reading transaction reads 50 from Account 2 (version T0).
+
+Now the data is consistent. And it looks like the reading transaction started and was committed before the writing transaction. Even if the writing transaction has started and was committed in the middle of the reading transaction.
+
+What if the writing transaction is started before the reading transaction and has not been committed while the reading transaction is executed? The result is the same. Even if there is a new version of both accounts, it's not visible for the reading transaction because only committed versions to become visible.
+
+What if:
+1. the writing transaction is started and updated the first account.
+2. then the reading transaction starts and reads the first account.
+3. after that the writing transaction updates the second account and commits.
+4. then the reading transaction reads the second account
+
+The same. In steps 2 and 4 the reading transaction sees only the old value of the second account because the writing transaction was in progress when the reading transaction started.
+
+Try to check any order of the transactions' execution to make sure that 1 + 2 + 3 rules guarantee that the reading transaction never sees the DB in an inconsistent state.
+
+So, if you have a read-only transaction, `REPEATABLE_READ` guarantees consistency.
+
+=== Lost update
+
+What about writing transactions? So far in our examples, we considered that one transaction is writing and another one is reading. Now, let's have both transactions changing the data.
+
+In our example, we have two transactions updating the same account in parallel. Each transaction reads the current amount and adds some value to it. The result of execution depends on the order, so we again have a race condition here. If the first transaction is fast enough then the second transaction will be able to read the amount written by the first transaction, and we have the expected result. The amount is a sum of two values added by two transactions. But if the second transaction was too fast and got the amount of the account before the first transaction changed it, then the second transaction overwrites what the first transaction has written. It's demonstrated below:
+
+[source, java]
+----------------
+    //given
+    final int userAccountId = 1;
+    transactionsWrapper.readCommitted(() -> {
+      var account = new Account();
+      account.setAmount(0);
+      account.setId(userAccountId);
+      accountRepository.saveAndFlush(account);
+    });
+
+    //expected
+    var phaseSync = new PhaseSync();
+    var firstUserTransfer = 50;
+    runAsync(() ->
+            transactionsWrapper.readCommitted(() -> {
+              Integer currentAmount = accountRepository.findById(userAccountId).map(Account::getAmount).orElseThrow();
+              phaseSync.phase(Phases.FIRST, () -> {
+                accountRepository.updateAmount(userAccountId, firstUserTransfer + currentAmount);
+              });
+            })
+            );
+
+    var secondUserTransfer = 30;
+    runAsync(() ->
+            transactionsWrapper.readCommitted(() -> {
+              Integer currentAmount = accountRepository.findById(userAccountId).map(Account::getAmount).orElseThrow();
+              phaseSync.phase(Phases.SECOND, () -> {
+                accountRepository.updateAmount(userAccountId, secondUserTransfer + currentAmount);
+              });
+            })
+            );
+
+    phaseSync.phase(Phases.THIRD, () -> {/* both transactions are done */});
+    assertThat(phaseSync.exceptionDetails(), phaseSync.noExceptions(), is(true));
+
+    Integer finalAmount = accountRepository.findById(userAccountId).map(Account::getAmount).orElseThrow();
+    assertThat(finalAmount, not(firstUserTransfer + secondUserTransfer));
+    assertThat(finalAmount, is(secondUserTransfer));
 ----------------
 
-NOTE: Again, we change the level of the query that execute the update only. We know that this query depends on the data that could be stale. So, we prevent non-repeatable read.
+==== To fix
+
+The fix is to change the isolation level from `READ_COMMITED` to `REPEATABLE_READ`. In general, the lost update problem occurs when two parallel transactions read the same value, modify it, and write back, so one of the changes is not considered and overwritten. The Postgres implementation of `REPEATABLE_READ` uses MVCC to detect lost updates. If some transaction tries to update some raw having the latest version Tx and the version visible for the transaction is different from Tx, then the raw has been updated already. So, the transaction should be rolled back. In our example:
+
+0. The account inserted with amount 0 and version T0
+1. The first transaction reads version T0
+2. The second transaction reads version T0
+3. The first transaction updates the account with the new value. The version that the transaction has read is T0 and the current version is T0, so the update is allowed. There are two versions of the account T0 and T1 now.
+4. The second transaction tries to update the account. It has version T0 and the latest version of the account is T1. The lost update is detected. The second transaction is rolled back.
+
+==== Optimistic vs Pessimistic locking
+
+Try to change the test's annotation from `@PostgresTest` to `@MySqlTest`. The fix doesn't work anymore. Why? MySQL's way of preventing lost updates is different. Instead of allowing concurrent transactions to try to read/modify/update the same data and be failed on update in case any problems are detected, MySQL allows users to prevent concurrent reads of the same data. Before reading the data a transaction could try to acquire a lock and if the lock is acquired, all other transactions are blocked on the same lock acquiring attempt. The lock is released when the transaction holding the lock is committed, so another one is awakened to acquire the lock.
+
+To acquire the lock preventing the lost update a transaction should perform `select for update`. In our case instead of
+
+[source, sql]
+-------------
+select * from account where id = 1;
+-------------
+
+we should run
+
+[source, sql]
+-------------
+select * from account where id = 1 for update;
+-------------
+
+So, the database takes a lock on all rows returned by this query, and the lock is released only when the transaction holding the lock is committed. Since both transactions execute this select command at the beginning, one transaction waits until another one is done.
+
+Unfortunately, those details are hidden behind the Spring JPA abstractions. I didn't find a way to force it to execute the select for update. If you know a way please comment about it.
 
 === Phantom Read
 
-Is `REPEATABLE_READ` level a guarantee that the transaction will never bring the system into inconsistent state? Nope, there are still cases.
+Is `REPEATABLE_READ` level a guarantee that the transaction will never bring the system into an inconsistent state? Nope, there are still cases.
 
-Imagine that we have a system managing 3 ATMs. The ATMs are connected to each other and there is no primary host managing the system. Each ATM has its own copy of all users and their accounts and can decide is it ok to allow withdrawing money for some particular user or not. As soon as user received some money from some ATM, the ATM let others know about the update, so they update their own copies of the user accounts.
+Imagine that we have a system managing 3 ATMs. The ATMs are connected to each other and there is no primary host managing the system. Each ATM has its own copy of all users and their accounts and can decide if is it ok to allow withdrawing money for some particular user or not. As soon as the user received some money from some ATM, the ATM let others know about the update, so they update their own copies of the user accounts.
 
-No, let's say that some ATM lost connection to other ATMs and some user want to withdraw some money. Should we allow to do that? The ATM is not connected to other ATMs, so there is no way to know if this user already got some money from other ATMs. The user can abuse the system by withdrawing all his or her money from ATMs that are online and then withdrawing the same money again from an ATM that has temporarily lost connection. On the other hand, we try to serve our users the best we can. It would be great to let them receive their money even if the ATM is offline.
+Now, let's say that one of the ATMs lost connection to other ATMs and some user wants to withdraw some money. Should we allow them to do that? The ATM is not connected to other ATMs, so there is no way to know if this user already got some money from other ATMs. The user can abuse the system by withdrawing all their money from ATMs that are online and then withdrawing the same money again from an ATM that has temporarily lost connection, so it's not aware of any account changes. On the other hand, we try to serve our users the best we can. It would be great to let them receive their money even if the ATM is offline.
 
 This problem is a great introduction to distributed systems issues, which we will certainly dive into in one of the next posts.
 
 .Try to find your own solution and only after that expand this block to read mine
 [%collapsible]
 ===========
-This problem is called split brain. To make a decision each part of the system has to be connected to the system. But what to do if the connection is lost? In our case we can't allow to withdraw all money from all accounts because of the above reasons. But we could program ATMs to allow withdrawing an amount of money less or equal to sum of the money of all accounts divided to number of ATMs (3 in our example) in case of split brain. So, if a user having 90 dollars try to get 30 dollars, and the ATM sees that some ATMs are not in the network, it's safe to let user withdraw this money if the ATM knows that all other ATMs are also following this rule. In worst case, all 3 ATMs are out of the network. Even if some user is trying to abuse the system and visited all 3 ATMs this user can only withdraw 90 dollars from all ATMs which is completely ok.
+This problem is called split brain. To make a decision each part of the system has to be connected to the system. But what to do if the connection is lost? In our case, we can't allow users to withdraw all money from all accounts because of the above reasons. But we could program ATMs to allow withdrawing an amount of money less or equal to the sum of the money of all accounts divided by the number of ATMs (3 in our example) in case of split-brain. So, if a user having 90 dollars try to get 30 dollars, and the ATM sees that some ATMs are not in the network, it's safe to let the user withdraw this money if the ATM knows that all other ATMs are also following this rule. In the worst case, all 3 ATMs are out of the network. Even if some user is trying to abuse the system and visits all 3 ATMs this user can only withdraw 90 dollars from all ATMs which is completely ok.
 ===========
 
-Ok, so, now when we know the solution you could argue that it's not very practical. In real life there are more than 3 ATMs and after some number of ATMs this solution doesn't work anymore (the amount of money allowed to withdraw is to low). But actually the same approach can be used in real life. Imagine, for example, that you're designing a system that should work on different continents. So, instead of ATMs you have an instance of the system located in some continent. The connection between the instances of the system could be slow because of the distances. You can improve performance of the whole system significantly if you allow withdrawing money without communicating with other parts of the system located in other continents if the requested amount of money is less that whole amount of money on all accounts divided by number of instances of the system.
+Ok, so, now, when we know the solution you could argue that it's not very practical. In real life, there are more than 3 ATMs and after some number of ATMs, this solution doesn't work anymore (the amount of money allowed to withdraw is too low). But actually, the same approach can be used in real life. Imagine, for example, that you're designing a system that should work on different continents. So, instead of ATMs, you have instances of the system located in some continent. The connection between the instances of the system could be slow because of the distances. You can improve the performance of the whole system significantly if you allow withdrawing money without communicating with other parts of the system located in other continents if the requested amount of money is less than the whole amount of money on all accounts divided by the number of instances of the system.
 
-Ok, say we implement a code that checks for the constraint. It fetches all user accounts from the database and allow to withdrar only when sum is greater or equal to 3x of the requested amount. Now, let's imagine that user request to withdraw money from two terminals in parallel. We have the same
+Let's try to implement a code that checks for the constraint. It fetches all user accounts from the database and allows withdrawing only when the sum is greater or equal to 3x of the requested amount. Say, that some user has two accounts. Now, imagine that two similar transactions are withdrawing money in parallel, but the first transaction charges the first account and the second transaction withdraws some money from the second account. It's very similar to the lost update situation. The only exception is that now different rows are modified but both rows are used to check the constraint. It means that there is a case when one of the transactions is committed and another one uses the stale data to check the constraint, it decided that the change is allowed, and based on this decision changes the data making it inconsistent. The change can't be prevented by `REPEATABLE_READ`
+
+[source, java]
+------------------
+    //given
+    final var amountToTransfer = 30;
+    final var firstAccountInitialAmount = 40;
+    final var secondAccountInitialAmount = 50;
+
+    var user = new User();
+    user.setUserName("someName");
+    var account1 = new Account();
+    account1.setId(1);
+    account1.setUser(user);
+    account1.setAmount(firstAccountInitialAmount);
+    var account2 = new Account();
+    account2.setId(2);
+    account2.setAmount(secondAccountInitialAmount);
+    account2.setUser(user);
+    user.setAccounts(List.of(account1, account2));
+    userRepository.saveAndFlush(user);
 
 
+    //expect
+    PhaseSync phaseSync = new PhaseSync();
 
-=== What to choose: repeatable read or serializable?
+    runAsync(() -> {
+      transactionsWrapper.repeatableRead(() -> {
+        AtomicBoolean isWithdrawAllowed = new AtomicBoolean(false);
+        phaseSync.phase(Phases.FIRST, () ->
+            isWithdrawAllowed.compareAndSet(false, allowedToWithdraw(amountToTransfer)));
+        if (isWithdrawAllowed.get()) {
+          phaseSync.phase(Phases.THIRD, () -> withdraw(amountToTransfer, 1));
+        }
+      });
+      phaseSync.phase(Phases.FOURTH, () -> {/* transaction is commited */});
+    });
 
-What is the difference between not-repeatable and phantom reads? In both cases we have two transactions A and B. A updates the data used by B to make some decision. In the case of a non-repeatable read, the data being read by B and modified by A is the same record. In the case of a phantom read, the data being read by B is only partially modified by A and B modifies another record. But why the repeatable read doesn't prevent the phantom read?
+    runAsync(() -> {
+      transactionsWrapper.repeatableRead(() -> {
+        AtomicBoolean isWithdrawAllowed = new AtomicBoolean(false);
+        phaseSync.phase(Phases.SECOND, () ->
+            isWithdrawAllowed.compareAndSet(false, allowedToWithdraw(amountToTransfer)));
+        if (isWithdrawAllowed.get()) {
+          phaseSync.phase(Phases.FIFTH, () -> withdraw(amountToTransfer, 2));
+        }
+      });
+    });
+    phaseSync.phase(Phases.SIXTH, () -> {/*done with all phases*/});
+    assertThat(phaseSync.noExceptions(), is(true));
+    // the constraint is violated
+    assertThat(accountRepository.findAll().stream().mapToInt(Account::getAmount).sum(), is(30));
+------------------
 
-As I mentioned in the begging of the post, even to choose isolation level you need to know how databases work under the hood. So, let's take a look how the `REPEATABLE_READ` and `SERIALIZABLE` are implemented.
+Please notice, that the only difference between the transactions is the account id they withdraw. Since the first transaction changes the first account and the second one changes the second account the MVCC rules can't detect the inconsistent write because different records are changed, so both transactions have the latest versions of the corresponding records. It's not the lost update situation.
+
+==== How to fix? SSI
+
+The fix is to use the strongest level called `SERIALIZABLE`. Basically, it's MVCC + additional checks on the write operations. MVCC allows isolating transactions from the reading point of view. So each transaction has its own snapshot of the database and no parallel changes are visible for the transaction. The additional checks allow isolating transactions from the writing point of view. So, it guarantees that if a transaction makes consistent changes running individually then it's correct in case of running in parallel with any other transactions.
+
+How do the checks work? When a transaction attempts to commit DB checks that all versions of all fetched rows are still the latest. So between any read and the transaction's commit, no other transactions committed a new version of the rows that the current transaction has read. In other words, no writes are ignored because of the MVCC rules. If the checks are passed the transaction is allowed to be committed. If not, it's rolled back.
+
+==== Two phase locking
+
+SSI is optimistic locking. Change the test's annotation from `@PostgresTest` to `@MySqlTest` and you'll get the pessimistic locking implementation of the `SERIALIZABLE` level. How does it work? In the previous blog post, we discussed a https://konoplev.me/en/programming/post/thread_racing.html#\_dirty_read[solution] that doesn't require all reading threads to wait for each other, but they always read consistent data even if the data is multiple fields that are modified by parallel threads. The solution is called _two phase locking_. Imagine that each row has two locks `read` and `write`. The locks are depends on each other. The read lock is not exclusive. Multiple transactions can acquire it. So, reading threads don’t need to wait for each other. But if the write lock is acquired then the read lock can't be acquired immediately and each reader should wait until the write lock is released. This is how we make all readers wait until the write is done. Also, the write lock can’t be acquired until all read locks are released. So the update is waiting for all readers to finish (otherwise they could read an inconsistent update). Are https://konoplev.me/en/programming/post/thread_racing.html#_deadlock[deadlocks] possible? Sure, but DB can resolve them. If DB sees that transaction A tries to acquire a write lock that transaction B is holding and A holds a lock that B is waiting for, then one of the transactions is aborted, so another one can proceed. So, this is pessimistic locking.
+
+==== Optimistic vs pessimistic locking
+
+To handle locks properly you need to catch exceptions (and retry in case of a problem). In the case of optimistic locking, the exception will be thrown when a transaction used stale data. In the case of pessimistic locking, the exception is thrown in case of timeout or deadlock. To use pessimistic locks, sometimes you need to request lock acquisition explicitly ("select for update").
+
+Optimistic locking is beneficial when there are not many contentions, so transactions are independent and read/write different rows. The more conflicts you have the more costly the rollbacks. At some point, it's better to be pessimistic and order transactions (using locks) to avoid rollbacks.
+
+=== Summary
+
+In all examples, we had two transactions A and B.
+
+Reading issues: Transaction A reads row 1 and row 2, and transaction B changes row 1 and row 2. The rows should be updated atomically (both are changed or both are not changed).
+
+`Dirty read` is when transaction A reads row 1 changed by B and then B is rolled back. So, A has data that shouldn't be visible. *To fix*: transaction A should have `READ_COMMITED` level. The issue is not possible in Postgres since `READ_UNCOMMITED` is actually `READ_COMMITED`.
+
+`Non repeatable read`: A reads row 1 then B changes row 1, row 2 and commits, then A reads row 2. From A's point of view row 1 and row 2 are inconsistent (it has stolen version of 1). *To fix*: transaction A should have `REPEATABLE_READ` level.
+
+Writing issues:
+
+`Lost update`: Transaction A reads row 1 and based on the value updates it, in parallel Transaction B reads the same row and based on the value also update it. Transaction B overrides transaction's A update. *To fix*: both transactions should have `REPEATABLE_READ` level in the case of Postgres or should use "select for update" in the case of MySQL.
+
+`Phantom read`: Both transactions read row 1 and row 2. Based on both values they make a decision. Transaction A updates row 1, and Transaction B updates row 2 based on the decision. After transaction A is committed, the data used by transaction B is no longer valid, so transaction's B decision is invalid, and as soon as transaction's B change is committed the data is inconsistent. *To fix*: both transactions should have `SERIALIZABLE` level.
+
+As you probably noticed, some database implementation details could be crucial. So, it's important to know at least if is it optimistic or pessimistic locking and what is guaranteed by each isolation level.
+
